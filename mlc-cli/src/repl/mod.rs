@@ -319,8 +319,8 @@ impl Repl {
                 &self.app,
                 &mut run_view,
             ).await;
-            analysis_client = Some(client);
-            analysis_proc = Some(proc);
+            analysis_client = client;
+            analysis_proc = proc;
             runner_rx = Some(rx);
             runner = Some(sub);
             app_mode = AppMode::Running;
@@ -641,8 +641,8 @@ impl Repl {
                                             &self.app,
                                             &mut run_view,
                                         ).await;
-                                        analysis_client = Some(client);
-                                        analysis_proc = Some(proc);
+                                        analysis_client = client;
+                                        analysis_proc = proc;
                                         runner_rx = Some(rx);
                                         runner = Some(sub);
                                         app_mode = AppMode::Running;
@@ -706,7 +706,7 @@ async fn start_run(
     cwd: Option<&str>,
     app: &AppContext,
     run_view: &mut RunViewState,
-) -> (AnalysisClient, tokio::process::Child, mpsc::Receiver<RunnerEvent>, SubprocessRunner) {
+) -> (Option<AnalysisClient>, Option<tokio::process::Child>, mpsc::Receiver<RunnerEvent>, SubprocessRunner) {
     // Reset run view
     *run_view = RunViewState::default();
     run_view.focus_stdout = true;
@@ -716,26 +716,22 @@ async fn start_run(
     run_view.status.run_id = run_id.clone();
     run_view.status.start_time = Some(Instant::now());
 
-    // Pick a random port for the analysis service
-    let port = pick_port();
-    let db_path = app.db_dir.join(format!("{}.sqlite", run_id));
-
-    // Start the analysis service subprocess
-    let analysis_proc = spawn_analysis_service(port, &run_id, &db_path).await;
-
     run_view.push_stdout(
         format!("[mlc] starting: {}", command),
         StdoutLineStyle::Plain,
     );
-    run_view.push_stdout(
-        format!("[mlc] analysis service → http://127.0.0.1:{}/insights", port),
-        StdoutLineStyle::Plain,
-    );
 
-    // Give the analysis service a moment to boot
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let analysis_client = AnalysisClient::new(port);
+    // Try to start the analysis service — optional, runs without it if unavailable.
+    let port = pick_port();
+    let db_path = app.db_dir.join(format!("{}.sqlite", run_id));
+    let analysis_proc = spawn_analysis_service(port, &run_id, &db_path).await;
+    let analysis_client = if analysis_proc.is_some() {
+        // Give the service a moment to boot before accepting connections.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Some(AnalysisClient::new(port))
+    } else {
+        None
+    };
 
     // Spawn the training subprocess
     let (runner_tx, runner_rx) = mpsc::channel::<RunnerEvent>(256);
@@ -762,17 +758,17 @@ async fn spawn_analysis_service(
     port: u16,
     run_id: &str,
     db_path: &std::path::Path,
-) -> tokio::process::Child {
+) -> Option<tokio::process::Child> {
     // Resolve the mlc-analysis package directory.
     // MLC_ANALYSIS_DIR overrides everything (useful for installed distributions).
-    // In dev: CARGO_MANIFEST_DIR points to packages/mlc-cli; go up two levels.
+    // In dev: CARGO_MANIFEST_DIR points to mlc-cli; go up two levels.
     let analysis_dir = std::env::var("MLC_ANALYSIS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent().unwrap()  // packages/
                 .parent().unwrap()  // repo root
-                .join("packages/mlc-analysis")
+                .join("mlc-analysis")
         });
 
     // Use the venv python if present, otherwise fall back to system python3.
@@ -797,10 +793,7 @@ async fn spawn_analysis_service(
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .unwrap_or_else(|e| panic!(
-            "failed to spawn analysis service (python={}): {} — run `uv sync` in packages/mlc-analysis",
-            python, e
-        ))
+        .ok()
 }
 
 // ---------------------------------------------------------------------------

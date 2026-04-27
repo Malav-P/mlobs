@@ -43,10 +43,6 @@ htmlcov/
 .env
 .env.*
 
-# Next.js
-packages/mlc-web/.next/
-packages/mlc-web/node_modules/
-
 # Cargo artifacts
 mlc-cli/target/
 .venv/
