@@ -20,3 +20,14 @@ mlc <whatever your command is>
 
 
 ![](./assets/run.png)
+
+
+
+## Info
+Run data is stored at `~/.mlc/runs`
+
+
+## Uninstall
+```bash
+sudo rm /usr/local/bin/mlc
+```
