@@ -342,17 +342,19 @@ impl Repl {
 
         // If launched with `mlc <cmd>`, auto-start
         if let Some((cmd, cwd)) = self.initial_run {
-            let (client, proc, rx, sub) = start_run(
-                &cmd,
-                cwd.as_deref(),
-                &self.app,
-                &mut run_view,
-            ).await;
-            run_view.has_analysis = client.is_some();
-            analysis_client = client;
-            analysis_proc = proc;
-            runner_rx = Some(rx);
-            runner = Some(sub);
+            match start_run(&cmd, cwd.as_deref(), &self.app, &mut run_view).await {
+                Ok((client, proc, rx, sub)) => {
+                    run_view.has_analysis = client.is_some();
+                    analysis_client = client;
+                    analysis_proc = proc;
+                    runner_rx = Some(rx);
+                    runner = Some(sub);
+                }
+                Err(e) => {
+                    run_view.push_stdout(format!("[mlc] error: {}", e), StdoutLineStyle::Error);
+                    run_view.finished = true;
+                }
+            }
             app_mode = AppMode::Running;
         }
 
@@ -476,27 +478,29 @@ impl Repl {
                                 StdoutLineStyle::Plain,
                             );
                             // Flush remaining events and fetch final report
-                            if let Some(ref mut client) = analysis_client {
+                            let final_report = if let Some(ref mut client) = analysis_client {
                                 client.flush().await;
-                                let final_report = client.get_insights().await.ok()
-                                    .and_then(|r| serde_json::to_value(r).ok());
-                                let cwd = std::env::current_dir()
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_default();
-                                let db_path = self.app.db_dir
-                                    .join(format!("{}.sqlite", run_view.status.run_id))
-                                    .display().to_string();
-                                let mut record = RunRecord::new(
-                                    &run_view.status.run_id,
-                                    &run_view.status.command,
-                                    &cwd,
-                                    &db_path,
-                                );
-                                record.ended_at = Some(chrono::Utc::now().to_rfc3339());
-                                record.exit_code = code;
-                                record.final_report = final_report;
-                                save_run(&self.app.run_history_dir, &record).ok();
-                            }
+                                client.get_insights().await.ok()
+                                    .and_then(|r| serde_json::to_value(r).ok())
+                            } else {
+                                None
+                            };
+                            let cwd = std::env::current_dir()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            let db_path = self.app.db_dir
+                                .join(format!("{}.sqlite", run_view.status.run_id))
+                                .display().to_string();
+                            let mut record = RunRecord::new(
+                                &run_view.status.run_id,
+                                &run_view.status.command,
+                                &cwd,
+                                &db_path,
+                            );
+                            record.ended_at = Some(chrono::Utc::now().to_rfc3339());
+                            record.exit_code = code;
+                            record.final_report = final_report;
+                            save_run(&self.app.run_history_dir, &record).ok();
                             // Kill analysis process
                             if let Some(ref mut proc) = analysis_proc {
                                 proc.kill().await.ok();
@@ -671,17 +675,19 @@ impl Repl {
                                         } else {
                                             args.to_string()
                                         };
-                                        let (client, proc, rx, sub) = start_run(
-                                            &cmd,
-                                            None,
-                                            &self.app,
-                                            &mut run_view,
-                                        ).await;
-                                        run_view.has_analysis = client.is_some();
-                                        analysis_client = client;
-                                        analysis_proc = proc;
-                                        runner_rx = Some(rx);
-                                        runner = Some(sub);
+                                        match start_run(&cmd, None, &self.app, &mut run_view).await {
+                                            Ok((client, proc, rx, sub)) => {
+                                                run_view.has_analysis = client.is_some();
+                                                analysis_client = client;
+                                                analysis_proc = proc;
+                                                runner_rx = Some(rx);
+                                                runner = Some(sub);
+                                            }
+                                            Err(e) => {
+                                                run_view.push_stdout(format!("[mlc] error: {}", e), StdoutLineStyle::Error);
+                                                run_view.finished = true;
+                                            }
+                                        }
                                         app_mode = AppMode::Running;
                                     }
                                 }
@@ -734,6 +740,14 @@ impl Repl {
     }
 }
 
+/// Truncate a string to at most `max_chars` Unicode scalar values.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_pos, _)) => &s[..byte_pos],
+        None => s,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Start a run — spawns analysis service + subprocess
 // ---------------------------------------------------------------------------
@@ -743,7 +757,7 @@ async fn start_run(
     cwd: Option<&str>,
     app: &AppContext,
     run_view: &mut RunViewState,
-) -> (Option<AnalysisClient>, Option<tokio::process::Child>, mpsc::Receiver<RunnerEvent>, SubprocessRunner) {
+) -> Result<(Option<AnalysisClient>, Option<tokio::process::Child>, mpsc::Receiver<RunnerEvent>, SubprocessRunner)> {
     // Reset run view
     *run_view = RunViewState::default();
     run_view.focus_stdout = true;
@@ -773,12 +787,9 @@ async fn start_run(
     // Spawn the training subprocess
     let (runner_tx, runner_rx) = mpsc::channel::<RunnerEvent>(256);
     let sub = SubprocessRunner::spawn(command, cwd, runner_tx).await
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to spawn process: {}", e);
-            panic!("Failed to spawn: {}", e);
-        });
+        .map_err(|e| anyhow::anyhow!("could not start '{}': {}", command, e))?;
 
-    (analysis_client, analysis_proc, runner_rx, sub)
+    Ok((analysis_client, analysis_proc, runner_rx, sub))
 }
 
 fn pick_port() -> u16 {
@@ -939,10 +950,6 @@ fn render_home(
                 Some(_) => Span::styled("✖", Style::default().fg(Color::Red)),
                 None    => Span::styled("?", Style::default().fg(Color::DarkGray)),
             };
-            let exit_str = match record.exit_code {
-                Some(c) => format!("exit {}", c),
-                None    => "killed".to_string(),
-            };
             // Exit code is authoritative; report health only applies on clean exit
             let report_healthy = record.final_report.as_ref()
                 .and_then(|r| r.get("healthy"))
@@ -954,8 +961,8 @@ fn render_home(
                 (Some(_), _)           => ("● failed",  Color::Red),
             };
 
-            let cmd_display = if record.command.len() > 36 {
-                format!("{}…", &record.command[..35])
+            let cmd_display = if record.command.chars().count() > 36 {
+                format!("{}…", truncate_chars(&record.command, 35))
             } else {
                 record.command.clone()
             };
@@ -965,7 +972,6 @@ fn render_home(
                 status_icon,
                 Span::raw("  "),
                 Span::styled(format!("{:<38}", cmd_display), Style::default().fg(Color::White)),
-                Span::styled(format!("{:<10}", exit_str), Style::default().fg(Color::DarkGray)),
                 Span::styled(health_str.to_string(), Style::default().fg(health_color)),
             ]));
         }
@@ -1080,8 +1086,8 @@ fn render_top_bar(f: &mut Frame, run_view: &RunViewState, area: Rect) {
         HealthSignal::Critical(s) => (s.as_str(), Color::Red),
     };
 
-    let cmd_short = if run_view.status.command.len() > 30 {
-        format!("{}…", &run_view.status.command[..29])
+    let cmd_short = if run_view.status.command.chars().count() > 30 {
+        format!("{}…", truncate_chars(&run_view.status.command, 29))
     } else {
         run_view.status.command.clone()
     };
