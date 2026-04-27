@@ -11,11 +11,11 @@ curl -fsSL https://raw.githubusercontent.com/Malav-P/mlobs/main/install.sh | sh
 
 Then run your training script:
 ```bash
-mlc python train.py --lr 1e-3
+mlc run python train.py --lr 1e-3
 # OR
-mlc python main.py
+mlc run python main.py
 # OR
-mlc <whatever your command is>
+mlc run <whatever your command is>
 ```
 
 

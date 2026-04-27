@@ -4,7 +4,7 @@ mod runner;
 mod analysis;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use app::AppContext;
@@ -18,14 +18,22 @@ use repl::Repl;
     disable_help_subcommand = true,
 )]
 struct Cli {
-    /// Command to run and monitor (e.g. `mlc python train.py`).
-    /// Omit to open the interactive REPL.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    cmd: Vec<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    /// Working directory for the command (defaults to current directory).
-    #[arg(long)]
-    cwd: Option<String>,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run and monitor a training command.
+    Run {
+        /// Command and arguments to execute (e.g. `mlc run python train.py --lr 0.01`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+
+        /// Working directory for the command (defaults to current directory).
+        #[arg(long)]
+        cwd: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -49,10 +57,9 @@ async fn main() -> Result<()> {
         std::process::exit(0);
     });
 
-    let initial_run = if cli.cmd.is_empty() {
-        None
-    } else {
-        Some((cli.cmd.join(" "), cli.cwd))
+    let initial_run = match cli.command {
+        Some(Commands::Run { cmd, cwd }) => Some((cmd.join(" "), cwd)),
+        None => None,
     };
 
     let app = AppContext::new();
