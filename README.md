@@ -30,4 +30,5 @@ Run data is stored at `~/.mlc/runs`
 ## Uninstall
 ```bash
 sudo rm /usr/local/bin/mlc
+rm -rf ~/.mlc/runs
 ```
