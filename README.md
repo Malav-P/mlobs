@@ -24,7 +24,19 @@ mlc run <whatever your command is>
 
 
 ## Info
-Run data is stored at `~/.mlc/runs`
+- Run data is stored at `~/.mlc/runs`
+- To guarantee that your metrics are captured, print in jsonl format:
+```python
+        print(json.dumps({
+                            "step":      global_step,
+                            "epoch":     epoch,
+                            "loss":      round(loss, 6),
+                            "acc":       round(acc, 6),
+                            "lr":        round(lr, 6),
+                            "grad_norm": round(float(np.linalg.norm(grad)), 6),
+                        }), 
+             flush=True)
+```
 
 
 ## Uninstall
