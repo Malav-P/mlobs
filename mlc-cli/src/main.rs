@@ -4,30 +4,28 @@ mod runner;
 mod analysis;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use app::AppContext;
 use repl::Repl;
 
 #[derive(Parser, Debug)]
-#[command(name = "mlc", about = "mlc — ML training monitor", version)]
+#[command(
+    name = "mlc",
+    about = "mlc — ML training monitor",
+    version,
+    disable_help_subcommand = true,
+)]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
+    /// Command to run and monitor (e.g. `mlc python train.py`).
+    /// Omit to open the interactive REPL.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    cmd: Vec<String>,
 
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Start a training run and monitor it: mlc run python train.py
-    Run {
-        /// Command and arguments to execute
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        cmd: Vec<String>,
-        /// Working directory (defaults to current directory)
-        #[arg(long)]
-        cwd: Option<String>,
-    },
+    /// Working directory for the command (defaults to current directory).
+    #[arg(long)]
+    cwd: Option<String>,
 }
 
 #[tokio::main]
@@ -51,16 +49,10 @@ async fn main() -> Result<()> {
         std::process::exit(0);
     });
 
-    // Parse the initial run command if provided
-    let initial_run = match cli.command {
-        Some(Commands::Run { cmd, cwd }) => {
-            if cmd.is_empty() {
-                eprintln!("mlc run: no command specified");
-                std::process::exit(1);
-            }
-            Some((cmd.join(" "), cwd))
-        }
-        None => None,
+    let initial_run = if cli.cmd.is_empty() {
+        None
+    } else {
+        Some((cli.cmd.join(" "), cli.cwd))
     };
 
     let app = AppContext::new();

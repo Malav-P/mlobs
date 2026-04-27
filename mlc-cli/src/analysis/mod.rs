@@ -1,3 +1,3 @@
 pub mod client;
 
-pub use client::{AnalysisClient, InsightReport, InsightAlert, AlertLevel};
+pub use client::{AnalysisClient, InsightReport, AlertLevel};

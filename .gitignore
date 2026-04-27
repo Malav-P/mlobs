@@ -46,3 +46,6 @@ htmlcov/
 # Cargo artifacts
 mlc-cli/target/
 .venv/
+
+# Private — analysis service (kept locally, not published)
+mlc-analysis/

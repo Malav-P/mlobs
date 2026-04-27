@@ -89,9 +89,4 @@ impl AnalysisClient {
         Ok(report)
     }
 
-    /// Check if the analysis service is reachable.
-    pub async fn health_check(&self) -> bool {
-        let url = format!("{}/health", self.base_url);
-        self.client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
-    }
 }

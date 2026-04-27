@@ -1,5 +1,3 @@
-pub mod commands;
-
 use std::collections::VecDeque;
 use std::io::stdout;
 use std::path::PathBuf;
@@ -31,12 +29,44 @@ use crate::runner::{
     RunnerEvent, SubprocessRunner,
 };
 use crate::runner::extractor::RateGate;
-use commands::build_registry;
 
 const HISTORY_FILE: &str = ".mlc/history";
 const MAX_HISTORY: usize = 500;
 const MAX_STDOUT_LINES: usize = 5000;
 const MAX_ALERT_FEED: usize = 200;
+const MAX_CHART_POINTS: usize = 2000;
+
+// ---------------------------------------------------------------------------
+// MetricSeries — bounded chart buffer
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct MetricSeries {
+    points: Vec<(f64, f64)>,
+    count: usize,
+    y_min: f64,
+    y_max: f64,
+    x_min: f64,
+    x_max: f64,
+}
+
+impl MetricSeries {
+    fn push(&mut self, x: f64, y: f64) {
+        if self.count == 0 {
+            self.y_min = y; self.y_max = y;
+            self.x_min = x; self.x_max = x;
+        } else {
+            if y < self.y_min { self.y_min = y; }
+            if y > self.y_max { self.y_max = y; }
+            if x > self.x_max { self.x_max = x; }
+        }
+        self.count += 1;
+        if self.points.len() >= MAX_CHART_POINTS {
+            self.points = self.points.iter().step_by(2).cloned().collect();
+        }
+        self.points.push((x, y));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Alert types
@@ -50,7 +80,6 @@ pub struct Alert {
     pub description: String,
     pub confidence: f64,
     pub suggestions: Vec<String>,
-    pub received_at: Instant,
 }
 
 impl Alert {
@@ -76,7 +105,6 @@ struct CriticalState {
     alert: Alert,
     cursor: usize,       // 0=stop, 1=continue, 2=details
     detail_open: bool,
-    raw_report: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +116,7 @@ struct RunViewState {
     stdout_lines: VecDeque<String>,
     stdout_style: VecDeque<StdoutLineStyle>,
     stdout_scroll: usize,
-    metrics: IndexMap<String, Vec<(f64, f64)>>,
+    metrics: IndexMap<String, MetricSeries>,
     selected_metric: Option<String>,
     metric_index: usize,
     alert_feed: VecDeque<Alert>,
@@ -98,6 +126,8 @@ struct RunViewState {
     new_points_since_inspect: u32,
     // Which pane has keyboard focus: true = stdout, false = alert feed
     focus_stdout: bool,
+    /// False when no analysis service is running — hides the alert feed pane.
+    has_analysis: bool,
     // True once the subprocess exits — user stays on run view until Esc
     finished: bool,
 }
@@ -276,7 +306,6 @@ impl Repl {
     pub async fn run(self) -> Result<()> {
         let cmd_history = load_history();
         let mut editor = LineEditor::new(cmd_history);
-        let _registry = build_registry();
 
         // Terminal setup
         let mut out = stdout();
@@ -311,7 +340,7 @@ impl Repl {
         let mut recent_runs: Vec<RunRecord> =
             list_runs(&self.app.run_history_dir, 8).unwrap_or_default();
 
-        // If launched with `mlc run <cmd>`, auto-start
+        // If launched with `mlc <cmd>`, auto-start
         if let Some((cmd, cwd)) = self.initial_run {
             let (client, proc, rx, sub) = start_run(
                 &cmd,
@@ -319,6 +348,7 @@ impl Repl {
                 &self.app,
                 &mut run_view,
             ).await;
+            run_view.has_analysis = client.is_some();
             analysis_client = client;
             analysis_proc = proc;
             runner_rx = Some(rx);
@@ -359,17 +389,34 @@ impl Repl {
                             match &class {
                                 LineClass::Metric(metrics) => {
                                     run_view.push_stdout(line.clone(), StdoutLineStyle::Metric);
-                                    if let Some(ref mut client) = analysis_client {
-                                        for m in metrics {
+
+                                    let ts = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs_f64();
+
+                                    for m in metrics {
+                                        let step = m.step.or_else(|| {
+                                            run_view.metrics.get(&m.key)
+                                                .map(|s| s.count as u64)
+                                        });
+                                        let s = step.unwrap_or_else(|| {
+                                            run_view.metrics.get(&m.key)
+                                                .map(|s| s.count as u64)
+                                                .unwrap_or(0)
+                                        });
+
+                                        run_view.metrics
+                                            .entry(m.key.clone())
+                                            .or_default()
+                                            .push(s as f64, m.value);
+
+                                        if m.key.contains("epoch") {
+                                            run_view.status.epoch = Some(m.value as u64);
+                                        }
+
+                                        if let Some(ref mut client) = analysis_client {
                                             if rate_gate.should_pass(&m.key) {
-                                                let step = m.step.or_else(|| {
-                                                    run_view.metrics.get(&m.key)
-                                                        .map(|v| v.len() as u64)
-                                                });
-                                                let ts = SystemTime::now()
-                                                    .duration_since(UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_secs_f64();
                                                 client.send_event(MetricEvent {
                                                     run_id: run_view.status.run_id.clone(),
                                                     key: m.key.clone(),
@@ -377,29 +424,18 @@ impl Repl {
                                                     step,
                                                     ts,
                                                 }).await;
-                                                // Also update local chart data
-                                                let s = step.unwrap_or_else(|| {
-                                                    run_view.metrics.get(&m.key)
-                                                        .map(|v| v.len() as u64)
-                                                        .unwrap_or(0)
-                                                });
-                                                run_view.metrics
-                                                    .entry(m.key.clone())
-                                                    .or_default()
-                                                    .push((s as f64, m.value));
-                                                // Update epoch from step if it looks like one
-                                                if m.key.contains("epoch") {
-                                                    run_view.status.epoch = Some(m.value as u64);
-                                                }
-                                                run_view.new_points_since_inspect += 1;
                                             }
                                         }
-                                        // Flush if interval elapsed
+                                    }
+
+                                    run_view.new_points_since_inspect += 1;
+
+                                    if let Some(ref mut client) = analysis_client {
                                         client.flush().await;
-                                        // Auto-select first metric for chart
-                                        if run_view.selected_metric.is_none() {
-                                            run_view.selected_metric = run_view.metrics.keys().next().cloned();
-                                        }
+                                    }
+
+                                    if run_view.selected_metric.is_none() {
+                                        run_view.selected_metric = run_view.metrics.keys().next().cloned();
                                     }
                                 }
                                 LineClass::Error => {
@@ -641,6 +677,7 @@ impl Repl {
                                             &self.app,
                                             &mut run_view,
                                         ).await;
+                                        run_view.has_analysis = client.is_some();
                                         analysis_client = client;
                                         analysis_proc = proc;
                                         runner_rx = Some(rx);
@@ -822,7 +859,6 @@ fn apply_insight_report(run_view: &mut RunViewState, report: InsightReport) {
             description: ia.description.clone(),
             confidence: ia.confidence,
             suggestions: ia.suggestions.clone(),
-            received_at: Instant::now(),
         };
         run_view.push_alert(alert.clone());
 
@@ -832,7 +868,6 @@ fn apply_insight_report(run_view: &mut RunViewState, report: InsightReport) {
                 alert,
                 cursor: 1, // default to "continue"
                 detail_open: false,
-                raw_report: serde_json::to_string(&report).unwrap_or_default(),
             });
         }
     }
@@ -969,11 +1004,11 @@ fn render_running(f: &mut Frame, run_view: &RunViewState) {
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                          // top bar
-            Constraint::Min(1),                             // main content
-            Constraint::Length(6),                          // alert feed
-            Constraint::Length(intervention_height),        // intervention panel
-            Constraint::Length(1),                          // keybind hint
+            Constraint::Length(1),                                              // top bar
+            Constraint::Min(1),                                                 // main content
+            Constraint::Length(if run_view.has_analysis { 6 } else { 0 }),     // alert feed
+            Constraint::Length(intervention_height),                            // intervention panel
+            Constraint::Length(1),                                              // keybind hint
         ])
         .split(area);
 
@@ -989,8 +1024,10 @@ fn render_running(f: &mut Frame, run_view: &RunViewState) {
     render_stdout(f, run_view, h_chunks[0]);
     render_chart(f, run_view, h_chunks[1]);
 
-    // Alert feed
-    render_alert_feed(f, run_view, v_chunks[2]);
+    // Alert feed (only when analysis service is running)
+    if run_view.has_analysis {
+        render_alert_feed(f, run_view, v_chunks[2]);
+    }
 
     // Intervention panel (if critical)
     if has_critical {
@@ -1148,25 +1185,25 @@ fn render_chart(f: &mut Frame, run_view: &RunViewState, area: Rect) {
         );
     }
 
-    let points = match run_view.metrics.get(&key) {
-        Some(pts) if !pts.is_empty() => pts,
+    let series = match run_view.metrics.get(&key) {
+        Some(s) if !s.points.is_empty() => s,
         _ => {
             f.render_widget(Paragraph::new("").block(block), area);
             return;
         }
     };
 
-    let min_x = points.first().map(|(x, _)| *x).unwrap_or(0.0);
-    let max_x = points.last().map(|(x, _)| *x).unwrap_or(1.0);
-    let min_y = points.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
-    let max_y = points.iter().map(|(_, y)| *y).fold(f64::NEG_INFINITY, f64::max);
+    let min_x = series.x_min;
+    let max_x = series.x_max;
+    let min_y = series.y_min;
+    let max_y = series.y_max;
     let y_range = (max_y - min_y).max(0.001);
 
     let dataset = Dataset::default()
         .marker(symbols::Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(Color::Cyan))
-        .data(points);
+        .data(&series.points);
 
     let chart = Chart::new(vec![dataset])
         .block(block)
