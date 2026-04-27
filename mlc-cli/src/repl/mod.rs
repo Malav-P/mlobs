@@ -589,8 +589,8 @@ impl Repl {
                                     continue;
                                 }
 
-                                // Tab switches focus between stdout and alert feed
-                                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+                                // Tab switches focus between stdout and alert feed (only when alert pane is visible)
+                                if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE && run_view.has_analysis {
                                     run_view.focus_stdout = !run_view.focus_stdout;
                                     continue;
                                 }
@@ -1042,27 +1042,33 @@ fn render_running(f: &mut Frame, run_view: &RunViewState) {
 
     // Keybind hint bar (replaces input bar — no typing during a run)
     let hint = if run_view.finished {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("  [ESC]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::styled(" home   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Tab]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" switch pane   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[↑/↓]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" scroll   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[←/→]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" cycle metrics", Style::default().fg(Color::DarkGray)),
-        ])
+        ];
+        if run_view.has_analysis {
+            spans.push(Span::styled("[Tab]", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" switch pane   ", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled("[↑/↓]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" scroll   ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("[←/→]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" cycle metrics", Style::default().fg(Color::DarkGray)));
+        Line::from(spans)
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("  [K]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             Span::styled(" kill   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Tab]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" switch pane   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[↑/↓]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" scroll   ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[←/→]", Style::default().fg(Color::DarkGray)),
-            Span::styled(" cycle metrics", Style::default().fg(Color::DarkGray)),
-        ])
+        ];
+        if run_view.has_analysis {
+            spans.push(Span::styled("[Tab]", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(" switch pane   ", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled("[↑/↓]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" scroll   ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("[←/→]", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" cycle metrics", Style::default().fg(Color::DarkGray)));
+        Line::from(spans)
     };
     f.render_widget(Paragraph::new(hint), v_chunks[4]);
 }
